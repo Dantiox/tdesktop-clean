@@ -1,0 +1,33 @@
+name: Build Patched Telegram Desktop
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+      - master
+
+jobs:
+  flatpak:
+    name: "Flatpak Builder"
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/flathub-infra/flatpak-github-actions:gnome-51
+      options: --privileged
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Build Flatpak
+        uses: flatpak/flatpak-github-actions/flatpak-builder@v6
+        with:
+          bundle: telegram-clean.flatpak
+          manifest-path: org.telegram.desktop.yml
+          cache: true
+
+      - name: Upload Flatpak Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: telegram-clean-flatpak
+          path: telegram-clean.flatpak
+          retention-days: 14
