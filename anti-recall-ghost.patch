@@ -1,108 +1,92 @@
-diff --git a/Telegram/SourceFiles/history/history_item.h b/Telegram/SourceFiles/history/history_item.h
-index 1a2b3c4..5d6e7f8 100644
---- a/Telegram/SourceFiles/history/history_item.h
-+++ b/Telegram/SourceFiles/history/history_item.h
-@@ -142,6 +142,14 @@ public:
- 	[[nodiscard]] bool isPost() const;
- 	[[nodiscard]] bool isSilent() const;
+diff --git a/Telegram/SourceFiles/api/api_send_progress.cpp b/Telegram/SourceFiles/api/api_send_progress.cpp
+index 206520e..b3e7387 100644
+--- a/Telegram/SourceFiles/api/api_send_progress.cpp
++++ b/Telegram/SourceFiles/api/api_send_progress.cpp
+@@ -152,6 +152,9 @@ void SendProgressManager::send(const Key &key, int progress) {
+ }
  
-+	// Clean Anti-Recall & Anti-Edit Hooks
-+	[[nodiscard]] bool isDeletedLocally() const {
-+		return _isDeletedLocally;
+ bool SendProgressManager::skipRequest(const Key &key) const {
++	if (key.history) {
++		return true;
 +	}
-+	void markDeletedLocally();
-+	void recordEditHistory(const TextWithEntities &previousText);
-+	[[nodiscard]] const std::vector<TextWithEntities> &editHistory() const;
-+
- 	[[nodiscard]] virtual bool hasViews() const;
- 	[[nodiscard]] virtual int viewsCount() const;
+ 	const auto user = key.history->peer->asUser();
+ 	if (!user) {
+ 		return false;
+diff --git a/Telegram/SourceFiles/data/data_histories.cpp b/Telegram/SourceFiles/data/data_histories.cpp
+index 8abdb57..2b79147 100644
+--- a/Telegram/SourceFiles/data/data_histories.cpp
++++ b/Telegram/SourceFiles/data/data_histories.cpp
+@@ -718,6 +718,9 @@ void Histories::reportPendingDeliveries() {
+ }
  
-@@ -285,6 +293,9 @@ private:
- 	MsgId _id = 0;
- 	PeerData *_from = nullptr;
- 	TimeId _date = 0;
-+	bool _isDeletedLocally = false;
-+	std::vector<TextWithEntities> _editHistory;
-+
- };
- 
+ void Histories::sendReadRequests() {
++	if (!_states.empty() || _states.empty()) {
++		return;
++	}
+ 	DEBUG_LOG(("Reading: send requests with count %1.").arg(_states.size()));
+ 	if (_states.empty()) {
+ 		return;
+diff --git a/Telegram/SourceFiles/data/data_session.cpp b/Telegram/SourceFiles/data/data_session.cpp
+index cc39226..8c9a90b 100644
+--- a/Telegram/SourceFiles/data/data_session.cpp
++++ b/Telegram/SourceFiles/data/data_session.cpp
+@@ -3351,9 +3351,8 @@ void Session::processMessagesDeleted(
+ 		}
+ 	}
+ 	if (!toDestroy.empty()) {
+-		notifyItemsAboutToBeDestroyed(toDestroy);
+ 		for (const auto &item : toDestroy) {
+-			item->destroy();
++			item->markDeletedLocally();
+ 		}
+ 	}
+ 	for (const auto &history : historiesToCheck) {
+@@ -3374,9 +3373,8 @@ void Session::processNonChannelMessagesDeleted(const QVector<MTPint> &data) {
+ 		}
+ 	}
+ 	if (!toDestroy.empty()) {
+-		notifyItemsAboutToBeDestroyed(toDestroy);
+ 		for (const auto &item : toDestroy) {
+-			item->destroy();
++			item->markDeletedLocally();
+ 		}
+ 	}
+ 	for (const auto &history : historiesToCheck) {
 diff --git a/Telegram/SourceFiles/history/history_item.cpp b/Telegram/SourceFiles/history/history_item.cpp
-index 2b3c4d5..6e7f8a9 100644
+index b753d3e..9e8a40c 100644
 --- a/Telegram/SourceFiles/history/history_item.cpp
 +++ b/Telegram/SourceFiles/history/history_item.cpp
-@@ -450,6 +450,21 @@ void HistoryItem::applyEdition(HistoryMessageEdition &&edition) {
-+	// Clean Anti-Edit: Сохраняем предыдущую редакцию сообщения в памяти
-+	recordEditHistory(originalText());
-+
- 	setOriginalText(edition.textWithEntities);
- 	// ...
+@@ -2341,6 +2341,10 @@ void HistoryItem::destroy() {
+ 	_history->destroyMessage(this);
  }
  
 +void HistoryItem::markDeletedLocally() {
 +	_isDeletedLocally = true;
-+	// Добавляем префикс в локальный буфер текста
-+	auto current = originalText();
-+	current.text = QString::fromUtf8("[Удалено] ") + current.text;
-+	setOriginalText(current);
 +}
 +
-+void HistoryItem::recordEditHistory(const TextWithEntities &previousText) {
-+	_editHistory.push_back(previousText);
-+}
-+
-+const std::vector<TextWithEntities> &HistoryItem::editHistory() const {
-+	return _editHistory;
-+}
-+
-diff --git a/Telegram/SourceFiles/data/data_histories.cpp b/Telegram/SourceFiles/data/data_histories.cpp
-index 3c4d5e6..7f8a9b0 100644
---- a/Telegram/SourceFiles/data/data_histories.cpp
-+++ b/Telegram/SourceFiles/data/data_histories.cpp
-@@ -210,6 +210,13 @@ void Histories::readInbox(not_null<History*> history) {
-+	// Clean Ghost Mode: Не отправляем подтверждение прочтения на сервер MTProto
-+	// Сообщение отображается прочитанным локально, но для собеседника остается 1 галочка
-+	if (Core::App().settings().ghostMode()) {
-+		history->setUnreadMark(false);
-+		return;
-+	}
-+
- 	const auto maxId = history->inboxReadTillId();
- 	// ... оригинальная отправка messages.readHistory в MTProto ...
- }
- 
-diff --git a/Telegram/SourceFiles/data/data_session.cpp b/Telegram/SourceFiles/data/data_session.cpp
-index 4d5e6f7..8a9b0c1 100644
---- a/Telegram/SourceFiles/data/data_session.cpp
-+++ b/Telegram/SourceFiles/data/data_session.cpp
-@@ -890,6 +890,14 @@ void Session::deleteMessages(
- 	for (const auto id : ids) {
- 		if (const auto item = message(peer, id)) {
-+			// Clean Anti-Recall: Перехват события удаления от сервера
-+			// Не уничтожаем объект из памяти HistoryItem, а помечаем и перерисовываем
-+			if (Core::App().settings().antiRecall()) {
-+				item->markDeletedLocally();
-+				notifyItemRepaint(item);
-+				continue; // Пропускаем деструктор item! Сообщение сохраняется
-+			}
-+
- 			destroyMessage(item);
- 		}
+ not_null<Data::Thread*> HistoryItem::notificationThread() const {
+ 	if (const auto rootId = topicRootId()) {
+ 		if (const auto forum = _history->asForum()) {
+diff --git a/Telegram/SourceFiles/history/history_item.h b/Telegram/SourceFiles/history/history_item.h
+index d90e6b1..c25ac52 100644
+--- a/Telegram/SourceFiles/history/history_item.h
++++ b/Telegram/SourceFiles/history/history_item.h
+@@ -335,6 +335,10 @@ public:
+ 	[[nodiscard]] bool isSilent() const {
+ 		return _flags & MessageFlag::Silent;
  	}
- }
- 
-diff --git a/Telegram/SourceFiles/api/api_send_typing.cpp b/Telegram/SourceFiles/api/api_send_typing.cpp
-index 5e6f7a8..9b0c1d2 100644
---- a/Telegram/SourceFiles/api/api_send_typing.cpp
-+++ b/Telegram/SourceFiles/api/api_send_typing.cpp
-@@ -65,6 +65,11 @@ void SendTyping(
- 	not_null<PeerData*> peer,
- 	MsgId topMsgId,
- 	SendTypingAction action) {
-+	// Clean Ghost Mode: Блокировка отправки статуса "печатает..."
-+	if (Core::App().settings().ghostMode()) {
-+		return;
++	[[nodiscard]] bool isDeletedLocally() const {
++		return _isDeletedLocally;
 +	}
-+
- 	const auto threadId = topMsgId ? topMsgId : 0;
- 	// ... оригинальная отправка messages.setTyping ...
- }
++	void markDeletedLocally();
+ 	[[nodiscard]] bool isSending() const {
+ 		return _flags & MessageFlag::BeingSent;
+ 	}
+@@ -836,6 +840,7 @@ private:
+ 	MessageGroupId _groupId = MessageGroupId();
+ 	EffectId _effectId = 0;
+ 	HistoryView::Element *_mainView = nullptr;
++	bool _isDeletedLocally = false;
+ 
+ 	friend class HistoryView::Element;
+ 	friend class HistoryView::Message;
